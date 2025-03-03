@@ -1,0 +1,28 @@
+name: 'learn-fabric'
+
+services:
+  control:
+    build:
+      context: docker/control
+    volumes:
+      - ./fabric:/fabric
+      - ./ssh:/ssh
+    working_dir: /fabric
+    hostname: control
+    networks:
+      - net
+  ubuntu:
+    build:
+      context: docker/ubuntu
+    volumes:
+      - ./ssh:/ssh
+    environment:
+      SSH_USERNAME: 'forge'
+      SSH_PASSWORD: 'forge'
+    hostname: ubuntu
+    networks:
+      - net
+
+networks:
+  net:
+    driver: bridge

@@ -11,15 +11,30 @@ services:
     hostname: control
     networks:
       - net
-  ubuntu:
+  ubuntu-1:
     build:
       context: docker/ubuntu
     volumes:
       - ./ssh:/ssh
     environment:
-      SSH_USERNAME: 'forge'
-      SSH_PASSWORD: 'forge'
+      SSH_USERNAME: 'vagrant'
+      SSH_PASSWORD: 'vagrant'
     hostname: ubuntu
+    ports:
+      - '2201:22'
+    networks:
+      - net
+  ubuntu-2:
+    build:
+      context: docker/ubuntu
+    volumes:
+      - ./ssh:/ssh
+    environment:
+      SSH_USERNAME: 'vagrant'
+      SSH_PASSWORD: 'vagrant'
+    hostname: ubuntu-2
+    ports:
+      - '2202:22'
     networks:
       - net
 

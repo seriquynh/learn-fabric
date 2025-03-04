@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     apt-get update && \
-    apt-get install -y sudo pip ssh fabric && \
+    apt-get install -y sudo pip ssh fabric python3-typer && \
     apt-get clean && \
     apt-get autoremove -y &&  \
     rm -rf /tmp/* /var/tmp/* && \

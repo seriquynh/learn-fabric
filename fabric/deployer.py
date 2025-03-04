@@ -81,6 +81,30 @@ class Deployer:
             func(self)
         return self
 
+    def task_group(self, name: str, task_names):
+        def func(_: Deployer):
+            for task_name in task_names:
+                for t in self.tasks:
+                    if t.name == task_name:
+                        t.func(self)
+                        break
+
+        desc = f'Task group "deploy" [%s]' % ', '.join(task_names)
+
+        return self.task_add(name, desc, func)
+
+    def exec(self, command: str, **kwargs):
+        results = []
+        for remote in self.remotes:
+            if self.io.selector == 'all' or self.io.selector == remote.data['alias']:
+                writeln(f'[%s] [exec] %s' % (remote.data['alias'], command))
+
+                conn = Connection(host=remote.data['alias'], user=remote.data['user'])
+                result = conn.run(command, **kwargs)
+                results.append(result)
+
+        return results
+
     def run(self):
         self.typer_app()
 
@@ -139,8 +163,8 @@ def task(name: str, desc: str):
 def about():
     print('Learn Fabric 1.0')
 
-@task(name='deploy:info', desc='Display info about deployment')
-def deploy_info(dep: Deployer):
+@task(name='deploy:start', desc='Start a new deployment')
+def deploy_start(dep: Deployer):
     for remote in dep.remotes:
         if dep.io.selector == 'all' or dep.io.selector == remote.data['alias']:
             release_name = 1
@@ -153,20 +177,28 @@ def deploy_info(dep: Deployer):
             if rn != '':
                 release_name = rn
             # TODO: dev is stage or environment. (dev, staging, production)
-            writeln(f'[%s] [%s] Deploying %s to %s (release %s)' % (remote.data['alias'], 'deploy:info', 'learn-fabric', 'dev', release_name))
+            writeln(f'[%s] [%s] Deploying %s to %s (release %s)' % (remote.data['alias'], 'deploy:start', 'learn-fabric', 'dev', release_name))
 
 @task(name='deploy:setup', desc='Set up directories and files')
 def deploy_setup(dep: Deployer):
     for remote in dep.remotes:
-        writeln(f'[%s] [%s] Set up directories and files' % (remote.data['alias'], 'deploy:setup'))
+        if dep.io.selector == 'all' or dep.io.selector == remote.data['alias']:
+            writeln(f'[%s] [%s] Set up directories and files' % (remote.data['alias'], 'deploy:setup'))
 
-        command = """
-            [ -d {{deploy_dir}} ] || mkdir -p {{deploy_dir}};
-            cd {{deploy_dir}};
-            [ -d .dep ] || mkdir .dep;
-            [ -d releases ] || mkdir releases;
-            [ -d shared ] || mkdir shared;
-        """.replace('{{deploy_dir}}', remote.data['deploy_dir'])
+            command = """
+                [ -d {{deploy_dir}} ] || mkdir -p {{deploy_dir}};
+                cd {{deploy_dir}};
+                [ -d .dep ] || mkdir .dep;
+                [ -d releases ] || mkdir releases;
+                [ -d shared ] || mkdir shared;
+            """.replace('{{deploy_dir}}', remote.data['deploy_dir'])
 
-        conn = Connection(host=remote.data['alias'], user=remote.data['user'])
-        conn.run(command)
+            writeln(f'[%s] [exec] %s' % (remote.data['alias'], command))
+
+            conn = Connection(host=remote.data['alias'], user=remote.data['user'])
+            conn.run(command)
+
+app.task_group('deploy', [
+    'deploy:start',
+    'deploy:setup',
+])

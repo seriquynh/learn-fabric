@@ -15,6 +15,18 @@ host('ubuntu-2').user('vagrant').deploy_dir('~/learn-fabric/dev')
 
 # Tasks
 
+@task(name='npm:check', desc='Check if npm exists')
+def npm_check(dep: Deployer):
+    dep.exec("""
+        which npm
+        if [ $? -ne 0 ]; 
+        then 
+            echo "no"
+        else
+            echo "yes"
+        fi
+    """, hide=True)
+
 @task(name='npm:install', desc='Install NPM packages')
 def npm_install(dep: Deployer):
     print('cd {{release_dir}}')

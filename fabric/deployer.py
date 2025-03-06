@@ -1,46 +1,36 @@
 import typing
+
 from typing_extensions import Annotated
 import re
 import typer
 
 from fabric import Connection
 
-def extract_curly_braces(text):
-    pattern = r'\{\{([^}]*)\}\}'
-    matches = re.findall(pattern, text)
-    return matches
+class InputOutput:
+    VERBOSITY_QUIET = 'quiet'
+    VERBOSITY_NORMAL = 'normal'
+    VERBOSITY_VERBOSE = 'verbose'
+    VERBOSITY_DEBUG = 'debug'
 
-def replace_placeholders_loop(template, values_dict):
-    # First extract all placeholders
-    placeholders = re.findall(r'\{\{([^}]*)\}\}', template)
-
-    # Make a copy of the template
-    result = template
-
-    # Replace each placeholder
-    for placeholder in placeholders:
-        if placeholder in values_dict:
-            result = result.replace(f"{{{{{placeholder}}}}}", values_dict[placeholder])
-
-    return result
-
-class DeployerIO:
-    def __init__(self, selector: str = 'all', branch: str = 'main'):
+    def __init__(self, selector: str = 'all', branch: str = 'main', stage: str = 'dev'):
         self.selector = selector
         self.branch = branch
+        self.stage = stage
+        self.verbosity = self.VERBOSITY_NORMAL
 
-class DeployerRemote:
-    def __init__(self, alias: str):
-        self.data = {'alias': alias}
+    def line(self, line: str = ''):
+        if self.verbosity == InputOutput.VERBOSITY_QUIET:
+            return
+        
+        print(line.replace('<success>', '').replace('</success>', ''))
 
-    def user(self, user: str):
-        self.data['user'] = user
-        return self
+class HostDefinition:
+    def __init__(self, name: str, user: str, deploy_dir: str):
+        self.name = name
+        self.user = user
+        self.deploy_dir = deploy_dir
 
-    def deploy_dir(self, deploy_dir: str):
-        self.data['deploy_dir'] = deploy_dir
-
-class DeployerTask:
+class TaskDefinition:
     def __init__(self, name: str, desc: str, func: typing.Callable):
         self.name = name
         self.desc = desc
@@ -48,125 +38,135 @@ class DeployerTask:
 
 class Deployer:
     def __init__(self):
-        self.typer_app = typer.Typer()
+        self.console = typer.Typer()
 
-        self.io = DeployerIO()
+        self.io = None
+        self.current_remote = None
 
+        self.config = {}
         self.remotes = []
-        self.items = {}
         self.tasks = []
 
-    def remote_add(self, alias: str):
-        remote = DeployerRemote(alias)
+    def remote_add(self, remote: HostDefinition) -> HostDefinition:
         self.remotes.append(remote)
         return remote
 
-    def item_set(self, key: str, value):
-        self.items[key] = value
+    def config_set(self, key: str, value):
+        self.config[key] = value
         return self
 
-    def item_add(self, key: str, value):
+    def config_add(self, key: str, value):
         pass # TODO: Append more values of a list
         return self
 
-    def task_add(self, name: str, desc: str, func: typing.Callable):
-        task_instance = DeployerTask(name, desc, func)
+    def task_define(self, name: str, desc: str, func: typing.Callable):
+        task = TaskDefinition(name, desc, func)
 
-        self.tasks.append(task_instance)
+        @self.console.command(name=name, help=desc)
+        def task_func(selector: str = typer.Argument(default='all'),
+                         branch: Annotated[str, typer.Option(help="The git repository branch.")] = "main",
+                         stage: Annotated[str, typer.Option(help="The deploy stage.")] = "dev",
+                         quiet: Annotated[bool, typer.Option(help="Do not print any output.")] = None,
+                         verbose: Annotated[bool, typer.Option(help="Print debug output.")] = None,):
+            if self.io is None:
+                self.io = InputOutput()
+                self.io.selector = selector
+                self.io.branch = branch
+                self.io.stage = stage
 
-        @self.typer_app.command(name=name, help=desc)
-        def command_func(selector: str = typer.Argument(default='all'), branch: Annotated[str, typer.Option(help="The git repository branch.")] = "main",):
-            self.io.selector = selector
-            self.io.branch = branch
-            func(self)
+                if quiet:
+                    self.io.verbosity = InputOutput.VERBOSITY_QUIET
+                elif verbose:
+                    self.io.verbosity = InputOutput.VERBOSITY_DEBUG
+                else:
+                    self.io.verbosity = InputOutput.VERBOSITY_NORMAL
+
+            for remote in self.remotes:
+                if selector == 'all' or remote.name == selector:
+                    self.current_remote = remote
+                    self.io.line(f'[%s] task > %s' % (remote.name, name))
+                    try:
+                        func(self)
+                    except:
+                        pass
+
+        self.tasks.append(task)
+
         return self
 
-    def run(self):
-        self.typer_app()
+    def task_group(self, name: str, task_names):
+        desc = f'Task group "%s" [%s]' % (name, ', '.join(task_names))
 
+        @self.console.command(name=name, help=desc)
+        def task_group_func(selector: str = typer.Argument(default='all'),
+                      branch: Annotated[str, typer.Option(help="The git repository branch.")] = "main",
+                      stage: Annotated[str, typer.Option(help="The deploy stage.")] = "dev",
+                      quiet: Annotated[bool, typer.Option(help="Do not print any output.")] = False,
+                      verbose: Annotated[bool, typer.Option(help="Print debug output.")] = False,):
+            if self.io is None:
+                self.io = InputOutput()
+                self.io.selector = selector
+                self.io.branch = branch
+                self.io.stage = stage
 
-# Global variables
+                if quiet:
+                    self.io.verbosity = InputOutput.VERBOSITY_QUIET
+                elif verbose:
+                    self.io.verbosity = InputOutput.VERBOSITY_DEBUG
+                else:
+                    self.io.verbosity = InputOutput.VERBOSITY_NORMAL
 
-app = Deployer()
+            for remote in self.remotes:
+                if self.io.selector == 'all' or remote.name == self.io.selector:
+                    self.current_remote = remote
+                    self.io.line(f'[%s] task > %s' % (remote.name, name))
+                    for task_name in task_names:
+                        for t in self.tasks:
+                            if t.name == task_name:
+                                self.io.line(f'[%s] task > %s' % (remote.name, task_name))
+                                try:
+                                    t.func(self)
+                                except:
+                                    pass
 
-# Configuration
+        return self
 
-def host(alias: str):
-    return app.remote_add(alias)
+    def run(self, command: str, **kwargs):
+        remote = self.current_remote
 
-def config(key, value):
-    return app.item_set(key, value)
+        if remote is None:
+            return
 
-def add(key: str, value: list):
-    return app.item_add(key, value)
+        command = self.parse(command, {
+            'stage': self.io.stage,
+        })
 
-## Input/Output
+        if self.io.verbosity == InputOutput.VERBOSITY_DEBUG:
+            self.io.line(f'[%s] run > %s' % (remote.name, command))
 
-def writeln(message: str):
-    print(message.replace('<success>', '').replace('</success>', ''))
+        conn = Connection(host=remote.name, user=remote.user)
 
-def info(message: str):
-    writeln("<success>info:</success> " + message)
+        res = conn.run(command, **kwargs)
 
-# Hooks
+        return res
 
-def after(job: str, do: str):
-    pass
+    def parse(self, text: str, params: dict = None) -> str:
+        remote = self.current_remote
+        if remote is not None:
+            text = text.replace('{{deploy_dir}}', remote.deploy_dir)
 
-## Core
-def run(command: str, **kwargs):
-    pass
+        keys = self._extract_curly_braces(text)
 
-def task(name: str, desc: str):
-    def caller(func: typing.Callable):
-        app.task_add(name, desc, func)
-        def wrapper(*args, **kwargs):
-            # Do something before the function call
-            print("Before the function call")
+        for key in keys:
+            if params is not None and key in params:
+                text = text.replace('{{' + key + '}}', params[key])
+            elif key in self.config:
+                text = text.replace('{{' + key + '}}', self.config[key])
 
-            # Call the original function
-            result = func(*args, **kwargs)
+        return text
 
-            # Do something after the function call
-            print("After the function call")
-            return result
-        return wrapper
-    return caller
-
-## Core Tasks
-
-@task(name='about', desc='Display info with the current setup')
-def about():
-    print('Learn Fabric 1.0')
-
-@task(name='deploy:info', desc='Display info about deployment')
-def deploy_info(dep: Deployer):
-    for remote in dep.remotes:
-        if dep.io.selector == 'all' or dep.io.selector == remote.data['alias']:
-            release_name = 1
-            command = 'if [ -f '+remote.data['deploy_dir']+'/.dep/release_name ]; then cat '+remote.data['deploy_dir']+'/.dep/release_name; fi'
-            conn = Connection(host=remote.data['alias'], user=remote.data['user'])
-            result = conn.run(command, hide=True)
-
-            rn = result.stdout.strip()
-
-            if rn != '':
-                release_name = rn
-            # TODO: dev is stage or environment. (dev, staging, production)
-            writeln(f'[%s] [%s] Deploying %s to %s (release %s)' % (remote.data['alias'], 'deploy:info', 'learn-fabric', 'dev', release_name))
-
-@task(name='deploy:setup', desc='Set up directories and files')
-def deploy_setup(dep: Deployer):
-    for remote in dep.remotes:
-        writeln(f'[%s] [%s] Set up directories and files' % (remote.data['alias'], 'deploy:setup'))
-
-        command = """
-            [ -d {{deploy_dir}} ] || mkdir -p {{deploy_dir}};
-            cd {{deploy_dir}};
-            [ -d .dep ] || mkdir .dep;
-            [ -d releases ] || mkdir releases;
-            [ -d shared ] || mkdir shared;
-        """.replace('{{deploy_dir}}', remote.data['deploy_dir'])
-
-        conn = Connection(host=remote.data['alias'], user=remote.data['user'])
-        conn.run(command)
+    @staticmethod
+    def _extract_curly_braces(text):
+        pattern = r'\{\{([^}]*)\}\}'
+        matches = re.findall(pattern, text)
+        return matches

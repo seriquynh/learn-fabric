@@ -1,7 +1,9 @@
 import typing
+
 from typing_extensions import Annotated
 import re
 import typer
+import getpass
 
 from fabric import Connection
 
@@ -24,21 +26,17 @@ def replace_placeholders_loop(template, values_dict):
 
     return result
 
-class DeployerIO:
-    def __init__(self, selector: str = 'all', branch: str = 'main'):
+class InputOutput:
+    def __init__(self, selector: str = 'all', branch: str = 'main', stage: str = 'dev'):
         self.selector = selector
         self.branch = branch
+        self.stage = stage
 
-class DeployerRemote:
-    def __init__(self, alias: str):
-        self.data = {'alias': alias}
-
-    def user(self, user: str):
-        self.data['user'] = user
-        return self
-
-    def deploy_dir(self, deploy_dir: str):
-        self.data['deploy_dir'] = deploy_dir
+class RemoteHost:
+    def __init__(self, name: str, user: str, deploy_dir: str):
+        self.name = name
+        self.user = user
+        self.deploy_dir = deploy_dir
 
 class DeployerTask:
     def __init__(self, name: str, desc: str, func: typing.Callable):
@@ -48,24 +46,24 @@ class DeployerTask:
 
 class Deployer:
     def __init__(self):
-        self.typer_app = typer.Typer()
+        self.current_remote = None
 
-        self.io = DeployerIO()
+        self.console = typer.Typer()
+        self.io = InputOutput()
 
+        self.config = {}
         self.remotes = []
-        self.items = {}
         self.tasks = []
 
-    def remote_add(self, alias: str):
-        remote = DeployerRemote(alias)
+    def remote_add(self, remote: RemoteHost) -> RemoteHost:
         self.remotes.append(remote)
         return remote
 
-    def item_set(self, key: str, value):
-        self.items[key] = value
+    def config_set(self, key: str, value):
+        self.config[key] = value
         return self
 
-    def item_add(self, key: str, value):
+    def config_add(self, key: str, value):
         pass # TODO: Append more values of a list
         return self
 
@@ -74,39 +72,74 @@ class Deployer:
 
         self.tasks.append(task_instance)
 
-        @self.typer_app.command(name=name, help=desc)
-        def command_func(selector: str = typer.Argument(default='all'), branch: Annotated[str, typer.Option(help="The git repository branch.")] = "main",):
+        @self.console.command(name=name, help=desc)
+        def command_func(selector: str = typer.Argument(default='all'),
+                         branch: Annotated[str, typer.Option(help="The git repository branch.")] = "main",
+                         stage: Annotated[str, typer.Option(help="The deploy stage.")] = "dev",):
             self.io.selector = selector
             self.io.branch = branch
-            func(self)
+            self.io.stage = stage
+
+            for remote in self.remotes:
+                if selector == 'all' or remote.name == selector:
+                    self.current_remote = remote
+                    self.line(f'[%s] task %s' % (remote.name, name))
+                    func(self)
+
         return self
 
     def task_group(self, name: str, task_names):
-        def func(_: Deployer):
-            for task_name in task_names:
-                for t in self.tasks:
-                    if t.name == task_name:
-                        t.func(self)
-                        break
+        def func(dep: Deployer):
+            for remote in dep.remotes:
+                if dep.io.selector == 'all' or remote.name == dep.io.selector:
+                    dep.current_remote = remote
+                    for task_name in task_names:
+                        for t in dep.tasks:
+                            if t.name == task_name:
+                                dep.line(f'[%s] task %s' % (remote.name, task_name))
+                                t.func(dep)
+                                break
 
         desc = f'Task group "deploy" [%s]' % ', '.join(task_names)
 
         return self.task_add(name, desc, func)
 
-    def exec(self, command: str, **kwargs):
-        results = []
-        for remote in self.remotes:
-            if self.io.selector == 'all' or self.io.selector == remote.data['alias']:
-                writeln(f'[%s] [exec] %s' % (remote.data['alias'], command))
+    @staticmethod
+    def line(line: str = ''):
+        print(line.replace('<success>', '').replace('</success>', ''))
 
-                conn = Connection(host=remote.data['alias'], user=remote.data['user'])
-                result = conn.run(command, **kwargs)
-                results.append(result)
+    def run(self, command: str, **kwargs):
+        remote = self.current_remote
 
-        return results
+        if remote is None:
+            return
 
-    def run(self):
-        self.typer_app()
+        command = self.parse(command, {
+            'stage': self.io.stage,
+        })
+
+        self.line(f'[%s] run %s' % (remote.name, command))
+
+        conn = Connection(host=remote.name, user=remote.user)
+
+        res = conn.run(command, **kwargs)
+
+        return res
+
+    def parse(self, text: str, params: dict = None) -> str:
+        remote = self.current_remote
+        if remote is not None:
+            text = text.replace('{{deploy_dir}}', remote.deploy_dir)
+
+        keys = extract_curly_braces(text)
+
+        for key in keys:
+            if params is not None and key in params:
+                text = text.replace('{{' + key + '}}', params[key])
+            elif key in self.config:
+                text = text.replace('{{' + key + '}}', self.config[key])
+
+        return text
 
 
 # Global variables
@@ -115,31 +148,24 @@ app = Deployer()
 
 # Configuration
 
-def host(alias: str):
-    return app.remote_add(alias)
+def host(name: str, user: str, deploy_dir: str) -> RemoteHost:
+    return app.remote_add(RemoteHost(name, user, deploy_dir))
 
 def config(key, value):
-    return app.item_set(key, value)
+    return app.config_set(key, value)
 
 def add(key: str, value: list):
-    return app.item_add(key, value)
-
-## Input/Output
-
-def writeln(message: str):
-    print(message.replace('<success>', '').replace('</success>', ''))
-
-def info(message: str):
-    writeln("<success>info:</success> " + message)
+    return app.config_add(key, value)
 
 # Hooks
 
 def after(job: str, do: str):
     pass
 
-## Core
-def run(command: str, **kwargs):
+def before(job: str, do: str):
     pass
+
+# Others
 
 def task(name: str, desc: str):
     def caller(func: typing.Callable):
@@ -159,46 +185,57 @@ def task(name: str, desc: str):
 
 ## Core Tasks
 
-@task(name='about', desc='Display info with the current setup')
-def about():
-    print('Learn Fabric 1.0')
+@task(name='list', desc='List commands')
+def list_commands(dep: Deployer):
+    dep.line('List commands')
 
 @task(name='deploy:start', desc='Start a new deployment')
 def deploy_start(dep: Deployer):
-    for remote in dep.remotes:
-        if dep.io.selector == 'all' or dep.io.selector == remote.data['alias']:
-            release_name = 1
-            command = 'if [ -f '+remote.data['deploy_dir']+'/.dep/release_name ]; then cat '+remote.data['deploy_dir']+'/.dep/release_name; fi'
-            conn = Connection(host=remote.data['alias'], user=remote.data['user'])
-            result = conn.run(command, hide=True)
+    command = """
+        if [ -f {{deploy_dir}}/.dep/release_name ]; then
+            cat {{deploy_dir}}/.dep/release_name
+        elif [ -f {{deploy_dir}}/.dep/latest_release ]; then
+            LATEST_RELEASE_NAME="$(cat {{deploy_dir}}/.dep/latest_release)"
+            RELEASE_NAME=$((LATEST_RELEASE_NAME + 1))
+            echo $RELEASE_NAME
+        else
+            echo 1 > {{deploy_dir}}/.dep/release_name
+            echo 1
+        fi
+    """
 
-            rn = result.stdout.strip()
+    res = dep.run(command, hide=True)
 
-            if rn != '':
-                release_name = rn
-            # TODO: dev is stage or environment. (dev, staging, production)
-            writeln(f'[%s] [%s] Deploying %s to %s (release %s)' % (remote.data['alias'], 'deploy:start', 'learn-fabric', 'dev', release_name))
+    release_name = res.stdout.strip()
+
+    dep.line(f'[%s] info Deploying %s to %s (release %s)' % (dep.current_remote.name, 'learn-fabric', 'dev', release_name))
+
+@task(name='deploy:lock', desc='Lock the deploy task')
+def deploy_lock(dep: Deployer):
+    user = getpass.getuser()
+    res = dep.run("[ -f {{deploy_dir}}/.dep/deploy.lock ] && echo +locked || echo "+user+" > {{deploy_dir}}/.dep/deploy.lock")
+    locked = res.stdout.strip()
+    if locked == '+locked':
+        locked_user = dep.run("cat {{deploy_dir}}/.dep/deploy.lock")
+        raise Exception(f"Deploy locked by %s. Execute 'deploy:unlock' task to unlock." % locked_user)
+
+@task(name='deploy:unlock', desc='Unlock the deploy task')
+def deploy_unlock(dep: Deployer):
+    dep.run('rm -rf {{deploy_dir}}/.dep/deploy.lock')
 
 @task(name='deploy:setup', desc='Set up directories and files')
 def deploy_setup(dep: Deployer):
-    for remote in dep.remotes:
-        if dep.io.selector == 'all' or dep.io.selector == remote.data['alias']:
-            writeln(f'[%s] [%s] Set up directories and files' % (remote.data['alias'], 'deploy:setup'))
-
-            command = """
-                [ -d {{deploy_dir}} ] || mkdir -p {{deploy_dir}};
-                cd {{deploy_dir}};
-                [ -d .dep ] || mkdir .dep;
-                [ -d releases ] || mkdir releases;
-                [ -d shared ] || mkdir shared;
-            """.replace('{{deploy_dir}}', remote.data['deploy_dir'])
-
-            writeln(f'[%s] [exec] %s' % (remote.data['alias'], command))
-
-            conn = Connection(host=remote.data['alias'], user=remote.data['user'])
-            conn.run(command)
+    command = """
+        [ -d {{deploy_dir}} ] || mkdir -p {{deploy_dir}};
+        cd {{deploy_dir}};
+        [ -d .dep ] || mkdir .dep;
+        [ -d releases ] || mkdir releases;
+        [ -d shared ] || mkdir shared;
+    """
+    dep.run(command)
 
 app.task_group('deploy', [
     'deploy:start',
     'deploy:setup',
+    'deploy:lock',
 ])

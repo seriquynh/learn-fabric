@@ -1,4 +1,6 @@
-from deployer import Deployer, app, host, config, add, task, after
+from deployer import Deployer
+
+from core import app, host, config, add, task, after
 
 
 # Hosts
